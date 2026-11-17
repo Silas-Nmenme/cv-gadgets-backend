@@ -1,0 +1,764 @@
+import { randomInt, randomUUID, createHash, timingSafeEqual } from "node:crypto";
+import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+import { z } from "zod";
+
+import User from "../models/User.js";
+import AdminBootstrap from "../models/AdminBootstrap.js";
+import {
+  issueOtp,
+  hashOtp,
+  safeHashEqual,
+} from "../services/otp.js";
+import {
+  sendBestEffortMail,
+  sendMail,
+} from "../services/mailer.js";
+import {
+  accountWelcomeEmail,
+  adminNewRegistrationEmail,
+  loginAlertEmail,
+  profileUpdatedEmail,
+  passwordChangedEmail,
+  passwordResetEmail,
+} from "../templates/emailTemplates.js";
+
+/* =========================================================
+   VALIDATION SCHEMAS
+========================================================= */
+
+const signupSchema = z.object({
+  name: z.string().trim().min(2).max(80),
+  email: z.string().trim().email().max(254),
+  password: z.string()
+    .min(10)
+    .max(128)
+    .regex(/[a-z]/, "Password must contain a lowercase letter")
+    .regex(/[A-Z]/, "Password must contain an uppercase letter")
+    .regex(/[0-9]/, "Password must contain a number"),
+});
+
+const loginSchema = z.object({
+  email: z.string().trim().email().max(254),
+  password: z.string().min(1).max(128),
+});
+
+const emailSchema = z.object({
+  email: z.string().trim().email().max(254),
+});
+
+const verifyOtpSchema = z.object({
+  email: z.string().trim().email().max(254),
+  otp: z.string().regex(/^\d{6}$/),
+});
+
+const resetPasswordSchema = z.object({
+  email: z.string().trim().email().max(254),
+  otp: z.string().regex(/^\d{6}$/),
+  password: z.string()
+    .min(10)
+    .max(128)
+    .regex(/[a-z]/, "Password must contain a lowercase letter")
+    .regex(/[A-Z]/, "Password must contain an uppercase letter")
+    .regex(/[0-9]/, "Password must contain a number"),
+});
+
+/* =========================================================
+   COMMON HELPERS
+========================================================= */
+
+const cookieName =
+  process.env.JWT_COOKIE_NAME || "cv_gadgets_session";
+
+const cookieSameSite =
+  (process.env.JWT_COOKIE_SAME_SITE || "lax").toLowerCase();
+
+const cookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: cookieSameSite,
+  path: "/",
+  maxAge: 24 * 60 * 60 * 1000,
+};
+
+const clearCookieOptions = {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === "production",
+  sameSite: cookieSameSite,
+  path: "/",
+};
+
+const otpFields =
+  "+verificationOtpHash +verificationOtpPurpose +verificationOtpExpiresAt +verificationOtpAttempts";
+
+function normalizeEmail(email) {
+  return email.trim().toLowerCase();
+}
+
+function loginClientDetails(req) {
+  const userAgent = req.get("user-agent") || "";
+  const browser = /Edg\//i.test(userAgent)
+    ? "Microsoft Edge"
+    : /Firefox\//i.test(userAgent)
+      ? "Firefox"
+      : /CriOS\//i.test(userAgent)
+        ? "Chrome for iOS"
+        : /Chrome\//i.test(userAgent)
+          ? "Chrome"
+          : /Version\/.*Safari\//i.test(userAgent)
+            ? "Safari"
+            : "Unknown browser";
+  const device = /iPhone/i.test(userAgent)
+    ? "iPhone"
+    : /iPad/i.test(userAgent)
+      ? "iPad"
+      : /Android/i.test(userAgent)
+        ? "Android device"
+        : /Windows/i.test(userAgent)
+          ? "Windows device"
+          : /Macintosh|Mac OS/i.test(userAgent)
+            ? "Mac"
+            : /Linux/i.test(userAgent)
+              ? "Linux device"
+              : "Unknown device";
+
+  return {
+    browser,
+    device,
+    ipAddress: typeof req.ip === "string" ? req.ip : "",
+  };
+}
+
+function publicUser(user) {
+  return {
+    id: String(user._id),
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    verified: user.verified,
+  };
+}
+
+function setSession(res, user) {
+  if (
+    !process.env.JWT_SECRET ||
+    process.env.JWT_SECRET.length < 32
+  ) {
+    throw new Error(
+      "JWT_SECRET must be configured with at least 32 characters."
+    );
+  }
+
+  const token = jwt.sign(
+    {
+      sub: String(user._id),
+      role: user.role,
+      sessionVersion: user.sessionVersion || 0,
+    },
+    process.env.JWT_SECRET,
+    {
+      algorithm: "HS256",
+      expiresIn: process.env.JWT_EXPIRES_IN || "1d",
+      issuer: "cv-gadgets-api",
+      audience: "cv-gadgets-web",
+    }
+  );
+
+  res.cookie(cookieName, token, cookieOptions);
+}
+
+function clearSession(res) {
+  res.clearCookie(cookieName, clearCookieOptions);
+}
+
+/* =========================================================
+   SIGNUP
+   POST /api/auth/signup
+========================================================= */
+
+async function registerAccount(req, res, next, role, bootstrapClaimToken) {
+  let bootstrapClaimed = false;
+  let createdUser;
+
+  try {
+    const parsed = signupSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Please provide valid registration details.",
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const { name, password } = parsed.data;
+    const email = normalizeEmail(parsed.data.email);
+
+    if (role === "admin") {
+      if (await User.exists({ role: "admin" })) {
+        return res.status(409).json({
+          message: "An administrator account has already been registered.",
+        });
+      }
+
+      bootstrapClaimed = await AdminBootstrap.claimInitialAdmin(
+        bootstrapClaimToken,
+        new Date(Date.now() + 10 * 60 * 1000)
+      );
+
+      if (!bootstrapClaimed) {
+        return res.status(409).json({
+          message:
+            "Admin registration is already in progress or the one-time setup has been used.",
+        });
+      }
+    }
+
+    const existingUser = await User.findOne({ email });
+
+    if (existingUser) {
+      if (bootstrapClaimed) {
+        await AdminBootstrap.releaseInitialAdminClaim(bootstrapClaimToken);
+        bootstrapClaimed = false;
+      }
+      return res.status(409).json({
+        message: "An account with this email already exists.",
+      });
+    }
+
+    createdUser = await User.create({
+      name,
+      email,
+      passwordHash: await bcrypt.hash(password, 12),
+      role,
+      verified: false,
+    });
+
+    let otpData;
+    try {
+      otpData = await issueOtp(email, name);
+    } catch (error) {
+      await User.deleteOne({ _id: createdUser._id });
+      createdUser = null;
+      if (bootstrapClaimed) {
+        await AdminBootstrap.releaseInitialAdminClaim(bootstrapClaimToken);
+        bootstrapClaimed = false;
+      }
+
+      return res.status(503).json({
+        message:
+          "Unable to send verification email. Please try again later.",
+      });
+    }
+
+    // Persist the OTP hash and expiry to the User document so that
+    // the verifyOtp controller can look it up from the database.
+    createdUser.verificationOtpHash = otpData.hash;
+    createdUser.verificationOtpPurpose = "verify";
+    createdUser.verificationOtpExpiresAt = otpData.expiresAt;
+    createdUser.verificationOtpAttempts = 0;
+    await createdUser.save();
+
+    if (bootstrapClaimed) {
+      const consumed = await AdminBootstrap.consumeInitialAdminClaim(
+        bootstrapClaimToken,
+        createdUser._id
+      );
+      if (!consumed) {
+        throw new Error("Unable to finalize the one-time admin registration.");
+      }
+      bootstrapClaimed = false;
+    }
+
+    await sendBestEffortMail({
+      event: "New account registration",
+      to: process.env.SHOP_OWNER_EMAIL,
+      ...adminNewRegistrationEmail(createdUser),
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: "Registration successful. Verification code sent.",
+      email,
+      requiresVerification: true,
+    });
+  } catch (error) {
+    if (role === "admin" && createdUser) {
+      await User.deleteOne({ _id: createdUser._id });
+    }
+    if (bootstrapClaimed) {
+      await AdminBootstrap.releaseInitialAdminClaim(bootstrapClaimToken);
+    }
+
+    if (error?.code === 11000) {
+      if (role === "admin") {
+        return res.status(409).json({
+          message: "An administrator account has already been registered.",
+        });
+      }
+      return res.status(409).json({
+        message: "An account with this email already exists.",
+      });
+    }
+
+    next(error);
+  }
+}
+
+export function signup(req, res, next) {
+  return registerAccount(req, res, next, "customer");
+}
+
+export function registerAdmin(req, res, next) {
+  const configuredKey = process.env.ADMIN_REGISTRATION_KEY;
+  const suppliedKey = req.get("x-admin-registration-key");
+
+  if (!configuredKey || configuredKey.length < 32) {
+    return res.status(503).json({
+      message:
+        "Admin registration is not configured. Set ADMIN_REGISTRATION_KEY to a secret of at least 32 characters in the backend environment.",
+    });
+  }
+
+  if (
+    typeof suppliedKey !== "string" ||
+    !timingSafeEqual(
+      createHash("sha256").update(suppliedKey).digest(),
+      createHash("sha256").update(configuredKey).digest()
+    )
+  ) {
+    return res.status(403).json({
+      message: "Admin registration setup key is invalid.",
+    });
+  }
+
+  return registerAccount(req, res, next, "admin", randomUUID());
+}
+
+/* =========================================================
+   VERIFY EMAIL
+   POST /api/auth/verify-otp
+========================================================= */
+
+export async function verifyOtp(req, res, next) {
+  try {
+    const parsed = verifyOtpSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Enter a valid email and six-digit code.",
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+    const { otp } = parsed.data;
+
+    const user = await User.findOne({ email }).select(otpFields);
+
+    if (
+      !user ||
+      user.verified ||
+      user.verificationOtpPurpose !== "verify" ||
+      !user.verificationOtpHash ||
+      !user.verificationOtpExpiresAt ||
+      user.verificationOtpExpiresAt.getTime() < Date.now() ||
+      (user.verificationOtpAttempts || 0) >= 5
+    ) {
+      return res.status(400).json({
+        message: "Invalid or expired verification code.",
+      });
+    }
+
+    user.verificationOtpAttempts =
+      (user.verificationOtpAttempts || 0) + 1;
+
+    const matches = safeHashEqual(
+      user.verificationOtpHash,
+      hashOtp(otp)
+    );
+
+    if (!matches) {
+      if (user.verificationOtpAttempts >= 5) {
+        user.verificationOtpHash = undefined;
+        user.verificationOtpPurpose = undefined;
+        user.verificationOtpExpiresAt = undefined;
+      }
+
+      await user.save();
+
+      return res.status(400).json({
+        message: "Invalid or expired verification code.",
+      });
+    }
+
+    user.verified = true;
+    user.verificationOtpHash = undefined;
+    user.verificationOtpPurpose = undefined;
+    user.verificationOtpExpiresAt = undefined;
+    user.verificationOtpAttempts = 0;
+
+    await user.save();
+
+    await sendBestEffortMail({
+      event: "Account verification welcome",
+      to: user.email,
+      ...accountWelcomeEmail(user),
+    });
+
+    return res.json({
+      success: true,
+      message: "Email verified successfully.",
+      user: publicUser(user),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* =========================================================
+   RESEND OTP
+   POST /api/auth/resend-otp
+========================================================= */
+
+export async function resendOtp(req, res, next) {
+  try {
+    const parsed = emailSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Please provide a valid email address.",
+      });
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+
+    const user = await User.findOne({ email })
+      .select(`${otpFields} +sessionVersion`);
+
+    if (user && !user.verified) {
+      let otpData;
+      try {
+        otpData = await issueOtp(user.email, user.name);
+      } catch {
+        return res.status(503).json({
+          message: "Unable to send verification code right now.",
+        });
+      }
+
+      // Persist the new OTP hash and expiry to the User document.
+      user.verificationOtpHash = otpData.hash;
+      user.verificationOtpPurpose = "verify";
+      user.verificationOtpExpiresAt = otpData.expiresAt;
+      user.verificationOtpAttempts = 0;
+      await user.save();
+    }
+
+    return res.json({
+      success: true,
+      message:
+        "If the account exists and requires verification, a code has been sent.",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* =========================================================
+   LOGIN
+   POST /api/auth/login
+========================================================= */
+
+export async function login(req, res, next) {
+  try {
+    const parsed = loginSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Please provide a valid email and password.",
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+    const { password } = parsed.data;
+
+    const user = await User.findOne({ email })
+      .select("+passwordHash +sessionVersion");
+
+    const passwordMatches = user
+      ? await bcrypt.compare(password, user.passwordHash)
+      : false;
+
+    if (!user || !passwordMatches) {
+      return res.status(401).json({
+        message: "Invalid email or password.",
+      });
+    }
+
+    if (!user.verified) {
+      return res.status(403).json({
+        message: "Please verify your email before signing in.",
+        requiresVerification: true,
+        email: user.email,
+      });
+    }
+
+    user.lastLoginAt = new Date();
+
+    await user.save();
+
+    setSession(res, user);
+
+    void sendBestEffortMail({
+      event: "Successful login alert",
+      to: user.email,
+      ...loginAlertEmail({
+        user,
+        occurredAt: user.lastLoginAt,
+        ...loginClientDetails(req),
+      }),
+    });
+
+    return res.json({
+      success: true,
+      message: "Login successful.",
+      user: publicUser(user),
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* =========================================================
+   CURRENT USER
+   GET /api/auth/me
+========================================================= */
+
+export async function getMe(req, res) {
+  return res.json({
+    success: true,
+    user: publicUser(req.user),
+  });
+}
+
+export async function updateMe(req, res, next) {
+  try {
+    const schema = z.object({
+      name: z.string().trim().min(2).max(80),
+    }).strict();
+    const parsed = schema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Please provide a valid full name.",
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const previousName = req.user.name;
+    req.user.name = parsed.data.name;
+    await req.user.save();
+
+    if (previousName !== req.user.name) {
+      void sendBestEffortMail({
+        event: "Profile name change notice",
+        to: req.user.email,
+        ...profileUpdatedEmail({
+          user: req.user,
+          previousName,
+          updatedAt: new Date(),
+        }),
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user: publicUser(req.user),
+      message: "Profile updated successfully.",
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/* =========================================================
+   LOGOUT
+   POST /api/auth/logout
+========================================================= */
+
+export async function logout(req, res, next) {
+  try {
+    req.user.sessionVersion = Number(req.user.sessionVersion || 0) + 1;
+    await req.user.save();
+    clearSession(res);
+
+    return res.json({
+      success: true,
+      message: "Signed out successfully.",
+    });
+  } catch (error) {
+    return next(error);
+  }
+}
+
+/* =========================================================
+   FORGOT PASSWORD
+   POST /api/auth/forgot-password
+========================================================= */
+
+export async function forgotPassword(req, res, next) {
+  try {
+    const parsed = emailSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Please provide a valid email address.",
+      });
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+
+    const user = await User.findOne({ email });
+
+    if (user && process.env.PASSWORD_RESET_ENABLED !== "false") {
+      const otp = String(randomInt(100000, 1000000));
+
+      user.verificationOtpHash = hashOtp(otp);
+      user.verificationOtpPurpose = "reset";
+
+      user.verificationOtpExpiresAt = new Date(
+        Date.now() + 10 * 60 * 1000
+      );
+
+      user.verificationOtpAttempts = 0;
+
+      await user.save();
+
+      try {
+        await sendMail({
+          to: user.email,
+          ...passwordResetEmail({ otp }),
+        });
+      } catch (error) {
+        user.verificationOtpHash = undefined;
+        user.verificationOtpPurpose = undefined;
+        user.verificationOtpExpiresAt = undefined;
+        user.verificationOtpAttempts = 0;
+
+        try {
+          await user.save();
+        } catch (cleanupError) {
+          console.error("Could not clear failed password-reset code:", {
+            message: cleanupError instanceof Error
+              ? cleanupError.message
+              : cleanupError,
+          });
+        }
+
+        console.error("Password reset email failed:", {
+          message: error instanceof Error ? error.message : error,
+          code: error?.code,
+          responseCode: error?.responseCode,
+          command: error?.command,
+        });
+
+        return res.status(503).json({
+          message:
+            "Unable to send password reset instructions right now.",
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message:
+        "If the account exists, password reset instructions will be sent.",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/* =========================================================
+   RESET PASSWORD
+   POST /api/auth/reset-password
+========================================================= */
+
+export async function resetPassword(req, res, next) {
+  try {
+    const parsed = resetPasswordSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      return res.status(400).json({
+        message: "Please provide valid password reset details.",
+        errors: parsed.error.flatten().fieldErrors,
+      });
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+    const { otp, password } = parsed.data;
+
+    const user = await User.findOne({ email }).select(otpFields);
+
+    if (
+      !user ||
+      user.verificationOtpPurpose !== "reset" ||
+      !user.verificationOtpHash ||
+      !user.verificationOtpExpiresAt ||
+      user.verificationOtpExpiresAt.getTime() < Date.now() ||
+      (user.verificationOtpAttempts || 0) >= 5
+    ) {
+      return res.status(400).json({
+        message: "Invalid or expired reset code.",
+      });
+    }
+
+    user.verificationOtpAttempts =
+      (user.verificationOtpAttempts || 0) + 1;
+
+    const matches = safeHashEqual(
+      user.verificationOtpHash,
+      hashOtp(otp)
+    );
+
+    if (!matches) {
+      if (user.verificationOtpAttempts >= 5) {
+        user.verificationOtpHash = undefined;
+        user.verificationOtpPurpose = undefined;
+        user.verificationOtpExpiresAt = undefined;
+      }
+
+      await user.save();
+
+      return res.status(400).json({
+        message: "Invalid or expired reset code.",
+      });
+    }
+
+    user.passwordHash = await bcrypt.hash(password, 12);
+    user.passwordChangedAt = new Date();
+    user.sessionVersion = (user.sessionVersion || 0) + 1;
+
+    user.verificationOtpHash = undefined;
+    user.verificationOtpPurpose = undefined;
+    user.verificationOtpExpiresAt = undefined;
+    user.verificationOtpAttempts = 0;
+
+    await user.save();
+
+    clearSession(res);
+
+    await sendBestEffortMail({
+      event: "Password changed security notice",
+      to: user.email,
+      ...passwordChangedEmail(user),
+    });
+
+    return res.json({
+      success: true,
+      message: "Password updated. Please sign in again.",
+    });
+  } catch (error) {
+    next(error);
+  }
+}
