@@ -47,9 +47,10 @@ export async function sendMail({
     );
   }
 
-  const transport = getTransport();
+  let transport;
 
   try {
+    transport = getTransport();
     const result = await transport.sendMail({
       from: process.env.MAIL_FROM || process.env.SMTP_USER,
       to,
@@ -74,17 +75,10 @@ export async function sendMail({
     });
 
     return result;
-  } catch (error) {
-    console.error("Nodemailer send error:", {
-      message: error.message,
-      code: error.code,
-      responseCode: error.responseCode,
-      command: error.command,
-    });
-
-    throw error;
   } finally {
-    transport.close();
+    if (transport) {
+      transport.close();
+    }
   }
 }
 
@@ -105,9 +99,10 @@ export async function sendBestEffortMail({ event, ...message }) {
  * Run this to test SMTP connectivity and authentication.
  */
 export async function verifyMailConfiguration() {
-  const transport = getTransport();
+  let transport;
 
   try {
+    transport = getTransport();
     await transport.verify();
 
     console.log("SMTP connection and authentication verified.");
@@ -123,6 +118,8 @@ export async function verifyMailConfiguration() {
 
     throw error;
   } finally {
-    transport.close();
+    if (transport) {
+      transport.close();
+    }
   }
 }

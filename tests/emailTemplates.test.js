@@ -25,7 +25,7 @@ import {
   reviewNotificationEmail,
   verificationEmail,
 } from "../templates/emailTemplates.js";
-import { sendBestEffortMail } from "../services/mailer.js";
+import { sendBestEffortMail, sendMail } from "../services/mailer.js";
 
 const user = {
   name: "<Customer>",
@@ -200,6 +200,29 @@ test("best-effort notifications report SMTP configuration failures without throw
     assert.match(String(logged[0][0]), /Test notification email failed/);
   } finally {
     console.error = originalError;
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("required email delivery rejects when SMTP configuration is missing", async () => {
+  const keys = ["SMTP_HOST", "SMTP_USER", "SMTP_PASS"];
+  const previous = new Map(keys.map(key => [key, process.env[key]]));
+
+  for (const key of keys) delete process.env[key];
+
+  try {
+    await assert.rejects(
+      sendMail({
+        to: "customer@example.com",
+        subject: "Verification",
+        text: "Your verification code is 123456.",
+      }),
+      /Email service is not configured/
+    );
+  } finally {
     for (const [key, value] of previous) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

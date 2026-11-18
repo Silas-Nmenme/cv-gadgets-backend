@@ -95,6 +95,15 @@ function normalizeEmail(email) {
   return email.trim().toLowerCase();
 }
 
+function logEmailFailure(event, error) {
+  console.error(`${event} failed:`, {
+    message: error instanceof Error ? error.message : String(error),
+    code: error?.code,
+    responseCode: error?.responseCode,
+    command: error?.command,
+  });
+}
+
 function loginClientDetails(req) {
   const userAgent = req.get("user-agent") || "";
   const browser = /Edg\//i.test(userAgent)
@@ -238,6 +247,7 @@ async function createAccount(req, res, next, role, bootstrapClaimToken) {
     try {
       otpData = await issueOtp(email, name);
     } catch (error) {
+      logEmailFailure("Signup verification email", error);
       await User.deleteOne({ _id: createdUser._id });
       createdUser = null;
       if (bootstrapClaimed) {
@@ -440,7 +450,8 @@ export async function resendOtp(req, res, next) {
       let otpData;
       try {
         otpData = await issueOtp(user.email, user.name);
-      } catch {
+      } catch (error) {
+        logEmailFailure("Resent verification email", error);
         return res.status(503).json({
           message: "Unable to send verification code right now.",
         });
