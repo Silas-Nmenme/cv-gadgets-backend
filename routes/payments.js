@@ -7,7 +7,7 @@ import {
 } from "../controllers/paymentsController.js";
 
 const router = Router();
-
+//initialize payment
 router.post("/initialize", initializePayment);
 
 router.get("/verify/:reference", verifyPayment);
