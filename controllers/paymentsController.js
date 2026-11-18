@@ -548,7 +548,7 @@ export async function paystackWebhook(req, res, next) {
       );
 
       if (failedOrder) {
-        void Promise.all([
+        await Promise.all([
           sendBestEffortMail({
             event: "Customer Paystack payment attempt failed",
             to: failedOrder.customer?.email,

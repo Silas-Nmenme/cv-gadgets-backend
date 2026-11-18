@@ -93,7 +93,7 @@ export async function unsubscribeNewsletter(req, res, next) {
     );
 
     if (subscriber) {
-      void sendBestEffortMail({
+      await sendBestEffortMail({
         event: "Newsletter unsubscribe confirmation",
         to: subscriber.email,
         ...newsletterUnsubscribeEmail(subscriber.email),

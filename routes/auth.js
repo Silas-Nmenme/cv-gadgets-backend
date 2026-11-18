@@ -23,7 +23,7 @@ const router = Router();
 ========================================================= */
 
 // Register account
-router.post("/registerAccount", authLimiter, signup);
+router.post("/signup", authLimiter, signup);
 
 // Bootstrap the first administrator using the backend-only setup key.
 router.post("/register-admin", authLimiter, registerAdmin);

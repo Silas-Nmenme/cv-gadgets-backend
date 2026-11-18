@@ -23,7 +23,7 @@ export const submitContactMessage = async (req, res, next) => {
       message,
     });
 
-    const [notified] = await Promise.all([
+    const [ownerNotified, customerNotified] = await Promise.all([
       sendBestEffortMail({
         event: "Contact enquiry notification",
         to: process.env.SHOP_OWNER_EMAIL,
@@ -43,7 +43,7 @@ export const submitContactMessage = async (req, res, next) => {
         }),
       }),
     ]);
-    if (!notified) {
+    if (!ownerNotified || !customerNotified) {
       return res.status(202).json({
         message:
           "Your message was received, but email notification is delayed.",

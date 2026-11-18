@@ -50,7 +50,7 @@ Configure Cloudinary with `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` and `CLO
 
 ## Email
 
-Configure SMTP using the `SMTP_*` variables and `MAIL_FROM`. Email verification and password reset depend on working SMTP delivery.
+Configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS` and `MAIL_FROM` in the deployed backend environment. Set `SHOP_OWNER_EMAIL` to the inbox that should receive administrator notifications. Signup verification and password reset require working SMTP delivery; other notifications are attempted before their API requests complete and delivery failures are logged. SMTP acceptance cannot guarantee inbox placement, so verify delivery with your mail provider.
 
 ## Tests
 

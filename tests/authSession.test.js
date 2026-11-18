@@ -4,6 +4,18 @@ import test from "node:test";
 import bcrypt from "bcryptjs";
 import { login, logout } from "../controllers/authController.js";
 import User from "../models/User.js";
+import authRouter from "../routes/auth.js";
+
+test("customer and admin registration use separate routes", () => {
+  const postPaths = authRouter.stack
+    .filter(layer => layer.route?.methods.post)
+    .map(layer => layer.route.path);
+
+  const registrationPaths = postPaths.filter(path =>
+    ["/signup", "/register-admin", "/registerAccount"].includes(path)
+  );
+  assert.deepEqual(registrationPaths, ["/signup", "/register-admin"]);
+});
 
 test("logout increments the session version before clearing the cookie", async () => {
   let saved = false;

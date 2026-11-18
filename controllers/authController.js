@@ -172,11 +172,12 @@ function clearSession(res) {
 }
 
 /* =========================================================
-   SIGNUP
+   ACCOUNT REGISTRATION
    POST /api/auth/signup
+   POST /api/auth/register-admin
 ========================================================= */
 
-async function registerAccount(req, res, next, role, bootstrapClaimToken) {
+async function createAccount(req, res, next, role, bootstrapClaimToken) {
   let bootstrapClaimed = false;
   let createdUser;
 
@@ -305,7 +306,7 @@ async function registerAccount(req, res, next, role, bootstrapClaimToken) {
 }
 
 export function signup(req, res, next) {
-  return registerAccount(req, res, next, "customer");
+  return createAccount(req, res, next, "customer");
 }
 
 export function registerAdmin(req, res, next) {
@@ -331,7 +332,7 @@ export function registerAdmin(req, res, next) {
     });
   }
 
-  return registerAccount(req, res, next, "admin", randomUUID());
+  return createAccount(req, res, next, "admin", randomUUID());
 }
 
 /* =========================================================
@@ -509,7 +510,7 @@ export async function login(req, res, next) {
 
     setSession(res, user);
 
-    void sendBestEffortMail({
+    await sendBestEffortMail({
       event: "Successful login alert",
       to: user.email,
       ...loginAlertEmail({
@@ -560,7 +561,7 @@ export async function updateMe(req, res, next) {
     await req.user.save();
 
     if (previousName !== req.user.name) {
-      void sendBestEffortMail({
+      await sendBestEffortMail({
         event: "Profile name change notice",
         to: req.user.email,
         ...profileUpdatedEmail({
