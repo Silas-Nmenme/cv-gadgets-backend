@@ -45,7 +45,7 @@ export async function getActivePromotions(_req, res, next) {
     return next(error);
   }
 }
-
+//Promo
 export async function validatePromo(req, res, next) {
   try {
     const promo = await findUsablePromo(req.validatedBody.code, req.user?._id);
