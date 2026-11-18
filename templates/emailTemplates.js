@@ -1,6 +1,6 @@
 const BRAND = "CV GADGETS";
 const WEBSITE_URL = (
-  process.env.STOREFRONT_URL || "http://localhost:5500"
+  process.env.STOREFRONT_URL || "https://cv-gadgets.vercel.app"
 ).replace(/\/+$/, "");
 const LOGO_URL = `${WEBSITE_URL}/assets/images/logo.svg`;
 const TEAL = "#f06a3a";

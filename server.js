@@ -26,7 +26,8 @@ const app = express();
 app.set("trust proxy", 1);
 
 const port = Number(process.env.PORT) || 3000;
-const productionFrontendOrigin = process.env.STOREFRONT_URL || "";
+const productionFrontendOrigin =
+  process.env.STOREFRONT_URL || "https://cv-gadgets.vercel.app";
 const configuredFrontendOrigins = [
   process.env.FRONTEND_ORIGINS,
   process.env.FRONTEND_ORIGIN,

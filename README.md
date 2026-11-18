@@ -26,7 +26,7 @@ Featured brands shown in the storefront are Apple, Samsung, HP, Dell and Lenovo.
 5. Serve the `frontend/` folder from a local static server (for example `npx serve frontend -l 5500`).
 6. Add the local storefront origin to `FRONTEND_ORIGINS` and set `STOREFRONT_URL` to that origin.
 
-The storefront uses a same-origin `/api` proxy in production. Deploy `frontend/` to Vercel or another static host. Deploy this Node.js API to a Node-compatible service such as Render, Railway or Fly.io. Replace `YOUR_BACKEND_DOMAIN` in `frontend/vercel.json` with the deployed API hostname. Set the backend `STOREFRONT_URL` and `FRONTEND_ORIGINS` to the exact deployed storefront origin.
+The storefront uses a same-origin `/api` proxy in production. The Vercel rewrite in `frontend/vercel.json` routes API requests to `https://cv-gadgets-backend.vercel.app`. The deployed storefront origin is `https://cv-gadgets.vercel.app`; set the backend `STOREFRONT_URL` to that URL and include it in `FRONTEND_ORIGINS`. For production Paystack redirects, set `PAYSTACK_CALLBACK_URL` to `https://cv-gadgets.vercel.app/thank-you.html`. Keep the localhost values from `.env.example` when running locally.
 
 ## First administrator
 
